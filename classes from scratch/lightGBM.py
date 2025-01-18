@@ -1,84 +1,58 @@
-"""
-Description: Implementation of LightGBM from scratch
-"""
 import numpy as np
-from decision_tree import DecisionTree
-
-class LightGBM :
-    
-
-    def __init__(self, n_estimators=100, learning_rate=0.1, max_depth=3, bins=2):
-        """
-        Parameters
-        ----------
-        n_estimators : int, optional, default=100
-            The number of boosting rounds.
-
-        learning_rate : float, optional, default=0.1
-
-        max_depth : int, optional, default=3
-            Maximum depth of the individual trees.
-
-        bins : int, optional, default=2
-            Number of bins to discretize the continuous features.
-
-        """
+from leafWiseGrowth import LeafWiseTree
+# Define the LightFBM class (LightGBM-like)
+class LightFBM:
+    def __init__(self, n_estimators=3, learning_rate=0.1, max_depth=3, n_jobs=4):
+        self.trees = []
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
         self.max_depth = max_depth
-        self.bins = bins
-        self.trees = []
+        self.initial_prediction = 0.5  # Starting prediction for logistic regression
+        self.n_jobs = n_jobs  # Number of parallel threads to use
 
-    def _mse_loss(self, y, y_pred):
-        grad = 2*(y_pred - y)# gradient of the loss
-        hess = 2*np.ones(y.shape[0]) # hessian is the derivative of the gradient
-        return grad, hess
-    
-    def fit(self,X,y):
-        #initialize predictions with the mean of the target values
-        y_pred = np.full_like(y,np.mean(y, axis=0))
+    def fit(self, X, y):
+        # Initialize the prediction with constant value
+        predictions = np.full_like(y, self.initial_prediction, dtype=float)
 
-        for _ in range(self.n_estimators):
-            #calculate the gradient and hessian of the loss
-            grad,hess = self._mse_loss(y,y_pred)
+        for i in range(self.n_estimators):
+            # Compute the gradients and Hessians based on current predictions
+            gradients, hessians = self._compute_grad_hess(y, predictions)
 
-            #fit a regression tree to the gradient
-            tree = DecisionTree(min_samples_split=2,max_depth=self.max_depth,n_feats=None)
-            tree.fit(X,grad,hess)
+            tree = LeafWiseTree(num_bins=60)  # Initialize the custom tree
+            print(f"Fitting tree {i + 1}")
+            tree.grow_tree(X, gradients, hessians, max_depth=self.max_depth, n_jobs=self.n_jobs)  # Grow the custom tree with parallelization
             self.trees.append(tree)
 
-            #update the predictions with the learning rate
-            y_pred = y_pred - self.learning_rate*tree.predict(X)
+            # Update predictions (Gradient Boosting update step)
+            tree_predictions = self._predict_tree(tree.root, X)
+            predictions += self.learning_rate * tree_predictions  # Update with learning rate
 
-    def predict(self,X):
-        #initialize predictions with zeros
-        y_pred = np.zeros(X.shape[0],dtype=np.float64)
+    def _compute_grad_hess(self, y, predictions):
+        # Compute gradients and Hessians for logistic regression (example)
+        errors = y - predictions
+        gradients = errors  # Gradient is the error
+        hessians = np.ones_like(errors)  # Hessian is constant (1) for simplicity
+        return gradients, hessians
 
-        #add predictions from all tree
+    def _predict_tree(self, node, X):
+        if node.is_leaf:
+            return np.full(X.shape[0], node.prediction)  # Return the leaf prediction
+        else:
+            left_indices = X[:, node.value] < node.threshold # node.value is the feature index
+            right_indices = X[:, node.value] >= node.threshold
+            predictions = np.zeros(X.shape[0])
+            predictions[left_indices] = self._predict_tree(node.left, X[left_indices])
+            predictions[right_indices] = self._predict_tree(node.right, X[right_indices])
+            return predictions
+
+    def predict(self, X):
+        # Final prediction is the sum of all trees' predictions, scaled by learning rate
+        predictions = np.full(X.shape[0], self.initial_prediction)
         for tree in self.trees:
-            y_pred += self.learning_rate*tree.predict(X)
-
-        return y_pred
-    
-
-"""
-# Example of usage
---------------------------------
-# Dataset
-X = np.array([[1], [2], [3], [4], [5]])
-y = np.array([2, 4, 6, 8, 10])
-
-# Instantiate and train the model
-lgbm = LightGBMFromScratch(n_estimators=10, learning_rate=0.1, max_depth=2, min_samples_split=2)
-lgbm.fit(X, y)
-
-# Predict
-y_pred = lgbm.predict(X)
-print("Predictions:", y_pred)
-
-"""
-
-
-
+            tree_predictions = self._predict_tree(tree.root, X)
+            predictions += self.learning_rate * tree_predictions # Update with learning rate (shrinkage)
+        return (predictions > 0.5).astype(int)
 
     
+    def score(self,y,y_pred):
+        return np.mean(y == y_pred)
